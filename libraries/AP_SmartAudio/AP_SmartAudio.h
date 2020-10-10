@@ -29,7 +29,6 @@
 #define AP_SMARTAUDIO_UART_BUFSIZE_TX      16
 #define AP_SMARTAUDIO_MAX_PACKET_SIZE      32
 
-
 #define SMARTAUDIO_SYNC_BYTE            0xAA
 #define SMARTAUDIO_HEADER_BYTE          0x55
 #define SMARTAUDIO_START_CODE           SMARTAUDIO_SYNC_BYTE + SMARTAUDIO_HEADER_BYTE
@@ -94,7 +93,7 @@ public:
             uint16_t rqsettings;
             uint16_t other_commands;
 
-        } _saStat ={};
+        } _saStat {};
 
         // Proposed to be into AP_VideoTX
         enum class HWVtxUpdates {
@@ -108,7 +107,7 @@ public:
 
      // FROM BETAFLIGHT
 
-     typedef struct smartaudioSettings_s {
+     struct smartaudioSettings_t {
         uint8_t  version;
         uint8_t  unlocked;
         uint8_t  channel;
@@ -138,57 +137,57 @@ public:
 
         bool initialized;
 
-    } smartaudioSettings_t;
+    } PACKED;
 
-    typedef struct smartaudioFrameHeader_s {
+    struct smartaudioFrameHeader_t {
         //   uint16_t startCode;
         uint8_t syncByte;
         uint8_t headerByte;
         uint8_t command;
         uint8_t length;
-    } __attribute__((packed)) smartaudioFrameHeader_t;
+    } PACKED;
 
-    typedef struct smartaudioCommandOnlyFrame_s {
+    struct smartaudioCommandOnlyFrame_t {
         smartaudioFrameHeader_t header;
         uint8_t crc;
-    } __attribute__((packed)) smartaudioCommandOnlyFrame_t;
+    } PACKED;
 
-    typedef struct smartaudioU8Frame_s {
+    struct smartaudioU8Frame_t {
         smartaudioFrameHeader_t header;
         uint8_t payload;
         uint8_t crc;
-    } __attribute__((packed)) smartaudioU8Frame_t;
+    } PACKED;
 
-    typedef struct smartaudioU16Frame_s {
+    struct smartaudioU16Frame_t {
         smartaudioFrameHeader_t header;
         uint16_t payload;
         uint8_t crc;
-    } __attribute__((packed)) smartaudioU16Frame_t;
+    } PACKED;
 
-    typedef struct smartaudioU8ResponseFrame_s {
+    struct smartaudioU8ResponseFrame_t {
         smartaudioFrameHeader_t header;
         uint8_t payload;
         uint8_t reserved;
         uint8_t crc;
-    } __attribute__((packed)) smartaudioU8ResponseFrame_t;
+    } PACKED;
 
-    typedef struct smartaudioU16ResponseFrame_s {
+    struct smartaudioU16ResponseFrame_t {
         smartaudioFrameHeader_t header;
         uint16_t payload;
         uint8_t reserved;
         uint8_t crc;
-    } __attribute__((packed)) smartaudioU16ResponseFrame_t;
+    } PACKED;
 
-    typedef struct smartaudioSettingsResponseFrame_s {
+    struct smartaudioSettingsResponseFrame_t {
         smartaudioFrameHeader_t header;
         uint8_t channel;
         uint8_t power;
         uint8_t operationMode;
         uint16_t frequency;
         uint8_t crc;
-    } __attribute__((packed)) smartaudioSettingsResponseFrame_t;
+    } PACKED;
 
-    typedef struct smartaudioSettingsExtendedResponseFrame_s{
+    struct smartaudioSettingsExtendedResponseFrame_t {
         smartaudioFrameHeader_t header;
         uint8_t channel;
         uint8_t power;
@@ -198,16 +197,15 @@ public:
         uint8_t power_levels_len;
         uint8_t* power_dbm_levels;
         uint8_t crc;
-    } __attribute__((packed)) smartaudioSettingsExtendedResponseFrame_t;
+    } PACKED;
 
     // v 2.1 additions to response frame
     //0x0E (current power in dBm) 0x03 (amount of power levels) 0x00(dBm level 1) 0x0E (dBm level 2) 0x14 (dBm level 3) 0x1A (dBm level 4) 0x01(CRC8)
-    typedef union smartaudioFrame_u {
+    union smartaudioFrame_t {
         smartaudioCommandOnlyFrame_t commandOnlyFrame;
         smartaudioU8Frame_t u8RequestFrame;
         smartaudioU16Frame_t u16RequestFrame;
-    } __attribute__((packed)) smartaudioFrame_t;
-
+    } PACKED;
 
     // request packet to be processed
     struct Packet{
@@ -230,6 +228,8 @@ public:
     smartaudioSettings_t _vtx_states_buffer[2];
     smartaudioSettings_t *_vtx_current_state;
 
+    // ready to go
+    volatile bool initialised;
 
      // RingBuffer to store outgoing request.
     ObjectBuffer<Packet> requests_queue{SMARTAUDIO_BUFFER_CAPACITY};
@@ -267,7 +267,7 @@ public:
     bool update(bool force);
 
     // sends a frame over the wire
-    void send_request(smartaudioFrame_t requestFrame, uint8_t size);
+    void send_request(const smartaudioFrame_t& requestFrame, uint8_t size);
 
     // receives a frame response over the wire
     bool read_response(uint8_t *response_buffer);
@@ -295,14 +295,10 @@ public:
     // enqueue a set power request using mw, generic interface from mw
     void set_power_mw(uint16_t power_mw,uint8_t spec_version);
 
-    void _push_vtx_state(smartaudioSettings_t state){
-        memcpy(&(_vtx_states_buffer[_vtx_state_idx==0?1:0]),&state,sizeof(smartaudioSettings_t));
-        _vtx_current_state=&_vtx_states_buffer[_vtx_state_idx==0?1:0];
-        _vtx_state_idx==0?_vtx_state_idx=1:_vtx_state_idx=0;
-    }
+    void _push_vtx_state(smartaudioSettings_t state);
 
     void _peek_vtx_state(smartaudioSettings_t& state_holder){
-        if(_vtx_current_state==nullptr){
+        if(!initialised){
             return;
         }
 
@@ -324,9 +320,9 @@ private:
     static AP_SmartAudio* _singleton;
 
     // response buffer length, permit splitted responses
-    uint8_t _inline_buffer_length=0;
-
-
+    uint8_t _inline_buffer_length = 0;
+    // expected packet size
+    uint8_t _packet_size = 0;
 
     // utility method for debugging
     void _print_state(smartaudioSettings_t& state,bool details,bool updates,bool ap_video_tx_details);
@@ -336,7 +332,7 @@ private:
 
 #ifdef SA_DEBUG
     // utility method for debugging.
-    void _print_bytes_to_hex_string(const char* msg, uint8_t buf[], uint8_t x,uint8_t offset);
+    void _print_bytes_to_hex_string(const char* msg, const uint8_t buf[], uint8_t x,uint8_t offset);
 #endif
     // utility method to get mw transformation from power in dbm
     static uint16_t _get_power_in_mw_from_dbm(uint8_t power){
