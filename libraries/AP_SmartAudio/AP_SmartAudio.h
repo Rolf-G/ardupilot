@@ -292,8 +292,8 @@ public:
     // enqueue a get pit mode frequency request
     void request_pit_mode_frequency();
 
-    // enqueue a set power request using mw, generic interface from mw
-    void set_power_mw(uint16_t power_mw,uint8_t spec_version);
+    // enqueue a set power request
+    void set_power(uint16_t power_mw, uint16_t dbm);
 
     void _push_vtx_state(smartaudioSettings_t state);
 

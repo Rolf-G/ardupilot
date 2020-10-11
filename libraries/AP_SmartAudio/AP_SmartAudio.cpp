@@ -60,10 +60,7 @@ bool AP_SmartAudio::init()
         _port->configure_parity(0);
         _port->set_stop_bits(2);
         _port->set_flow_control(AP_HAL::UARTDriver::FLOW_CONTROL_DISABLE);
-        //_port->set_unbuffered_writes(true);
-        _port->set_options((_port->get_options()
-            | AP_HAL::UARTDriver::OPTION_NODMA_TX | AP_HAL::UARTDriver::OPTION_NODMA_RX)
-            & ~AP_HAL::UARTDriver::OPTION_RXINV);
+        _port->set_options(_port->get_options() & ~AP_HAL::UARTDriver::OPTION_RXINV);
         if (!hal.scheduler->thread_create(FUNCTOR_BIND_MEMBER(&AP_SmartAudio::loop, void),
                                           "SmartAudio",
                                           512, AP_HAL::Scheduler::PRIORITY_IO, -1)) {
@@ -311,7 +308,7 @@ bool AP_SmartAudio::update(bool force)
 
     // sync power with AP_VideoTx backend
     if(sync_power()){
-        set_power_mw(AP::vtx().get_power_mw(),_vtx_current_state->version);
+        set_power(AP::vtx().get_configured_power_mw(), AP::vtx().get_configured_power_dbm());
     }
 
     uint8_t curr_operation_mode=(current_state.pitmodeInRangeActive<<0)
@@ -320,13 +317,26 @@ bool AP_SmartAudio::update(bool force)
     | ((current_state.unlocked>0)<<3);
 
     uint8_t new_operation_mode=curr_operation_mode;
+    uint8_t opts = AP::vtx().get_options();
 
-    new_operation_mode ^= (-(AP::vtx().get_options() & uint8_t(AP_VideoTX::VideoOptions::VTX_PITMODE)) ^ new_operation_mode) & (1UL << 2);
+    if (opts & uint8_t(AP_VideoTX::VideoOptions::VTX_PITMODE)) {
+        new_operation_mode |= (1 << 0);
+    } else {
+        if (curr_operation_mode & (1 << 0)) {
+            new_operation_mode |= (1 << 2);
+        }
+        new_operation_mode &= ~(1 << 0);
+    }
+#if 0 // changing the locked status via SA is not possible
+    if (opts & uint8_t(AP_VideoTX::VideoOptions::VTX_UNLOCKED)) {
+        new_operation_mode |= (1 << 3);
+    } else {
+        new_operation_mode &= ~(1 << 3);
+    }
+#endif
 
-    new_operation_mode ^= (-(AP::vtx().get_options() & uint8_t(AP_VideoTX::VideoOptions::VTX_UNLOCKED)) ^ new_operation_mode) & (1UL << 3);
-
-    if(curr_operation_mode!=new_operation_mode){
-        debug("UPDATE AP_VTX->HW_VTX: OPTIONS");
+    if(curr_operation_mode != new_operation_mode && (new_operation_mode & (1 << 3))){
+        debug("UPDATE AP_VTX->HW_VTX: OPTIONS %02X -> %02X", curr_operation_mode, new_operation_mode);
         set_operation_mode(new_operation_mode);
     }
 
@@ -585,12 +595,11 @@ bool AP_SmartAudio::get_readings(AP_VideoTX *vtx_dest)
    }
 
    // locking status
-
-   vtx_dest->set_options(current_state.unlocked==0?
-   (vtx_dest->get_options() | uint8_t(AP_VideoTX::VideoOptions::VTX_UNLOCKED))
-   :
-   (vtx_dest->get_options() | ~uint8_t(AP_VideoTX::VideoOptions::VTX_UNLOCKED))
-   );
+    if (current_state.unlocked) {
+        vtx_dest->set_options(vtx_dest->get_options() | uint8_t(AP_VideoTX::VideoOptions::VTX_UNLOCKED));
+    } else {
+        vtx_dest->set_options(vtx_dest->get_options() & ~uint8_t(AP_VideoTX::VideoOptions::VTX_UNLOCKED));
+    }
 
    // spec 2.1 power-levels in dbm
    vtx_dest->set_power_dbm(current_state.power_in_dbm);
@@ -726,18 +735,16 @@ void AP_SmartAudio::request_pit_mode_frequency(){
  }
 
 // send vtx request to set power defined in mw
-void AP_SmartAudio::set_power_mw(uint16_t power_mw,uint8_t spec_version){
+void AP_SmartAudio::set_power(uint16_t power_mw, uint16_t power_dbm){
+
+    debug("Setting power to %dmw", power_mw);
 
     // Spec set power directly in dbm corresponding to the data table responsed by settings
-    if(spec_version!=SMARTAUDIO_SPEC_PROTOCOL_v21){
-        set_power(_get_power_level_from_dbm(spec_version,_get_power_in_dbm_from_mw(power_mw)));
+    if(_vtx_current_state->version == SMARTAUDIO_SPEC_PROTOCOL_v21) {
+        set_power(uint8_t(power_dbm) | 0x80);
+    } else {
+        set_power(_get_power_level_from_dbm(_vtx_current_state->version, _get_power_in_dbm_from_mw(power_mw)));
     }
-
-    // Spec set power using power levels transformation tables
-    if(spec_version==SMARTAUDIO_SPEC_PROTOCOL_v21){
-        set_power(_get_power_in_dbm_from_mw(power_mw));
-    }
-    return;
 }
 
 /*
@@ -1047,9 +1054,9 @@ bool AP_SmartAudio::hot_deploy(){
 }
 
 // return true if power need to bee synced with the AP_VideoTx backend
-bool AP_SmartAudio::sync_power(){
-    if(_vtx_current_state->version==SMARTAUDIO_SPEC_PROTOCOL_v21){
-        return AP::vtx().get_power_mw()!=_get_power_in_mw_from_dbm(_vtx_current_state->power);
+bool AP_SmartAudio::sync_power() {
+    if(_vtx_current_state->version == SMARTAUDIO_SPEC_PROTOCOL_v21){
+        return AP::vtx().get_configured_power_dbm() != _vtx_current_state->power;
     }else{
         return AP::vtx().get_power_mw()!=_get_power_in_mw_from_dbm(_get_power_in_dbm_from_vtx_power_level(_vtx_current_state->power,_vtx_current_state->version));
     }
