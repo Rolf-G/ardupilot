@@ -66,6 +66,8 @@ public:
     // request information on dma contention
     void dma_info(ExpandingString &str) override;
 #endif
+    // request information on uart I/O
+    virtual void uart_info(ExpandingString &str) override;
     
 private:
 #ifdef HAL_PWM_ALARM
