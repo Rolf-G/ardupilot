@@ -190,6 +190,9 @@ public:
     // request information on dma contention
     virtual void dma_info(ExpandingString &str) {}
 
+    // request information on uart I/O
+    virtual void uart_info(ExpandingString &str) {}
+
 protected:
     // we start soft_armed false, so that actuators don't send any
     // values until the vehicle code has fully started
