@@ -477,33 +477,16 @@ void Scheduler::_io_thread(void* arg)
     while (!sched->_hal_initialized) {
         sched->delay_microseconds(1000);
     }
-#ifndef HAL_NO_LOGGING
-    uint32_t last_sd_start_ms = AP_HAL::millis();
-#endif
 #if CH_DBG_ENABLE_STACK_CHECK == TRUE
     uint32_t last_stack_check_ms = 0;
 #endif
     while (true) {
         sched->delay_microseconds(1000);
-
         // run registered IO processes
         sched->_run_io();
 
-#if !defined(HAL_NO_LOGGING) || CH_DBG_ENABLE_STACK_CHECK == TRUE
-        uint32_t now = AP_HAL::millis();
-#endif
-
-#ifndef HAL_NO_LOGGING
-        if (!hal.util->get_soft_armed()) {
-            // if sdcard hasn't mounted then retry it every 3s in the IO
-            // thread when disarmed
-            if (now - last_sd_start_ms > 3000) {
-                last_sd_start_ms = now;
-                AP::FS().retry_mount();
-            }
-        }
-#endif
 #if CH_DBG_ENABLE_STACK_CHECK == TRUE
+        uint32_t now = AP_HAL::millis();
         if (now - last_stack_check_ms > 1000) {
             last_stack_check_ms = now;
             sched->check_stack_free();
