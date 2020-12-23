@@ -1260,6 +1260,9 @@ void AP_Logger::io_thread(void)
 
         if (now - last_run_us < 1000) {
             hal.scheduler->delay_microseconds(1000 - (now - last_run_us));
+        } else {
+            // always have some delay
+            hal.scheduler->delay_microseconds(250);
         }
 
         last_run_us = AP_HAL::micros();
