@@ -34,6 +34,7 @@ static const SysFileList sysfs_file_list[] = {
     {"threads.txt"},
     {"tasks.txt"},
     {"dma.txt"},
+    {"uarts.txt"},
 #if HAL_MAX_CAN_PROTOCOL_DRIVERS
     {"can_log.txt"},
     {"can0_stats.txt"},
@@ -90,6 +91,9 @@ int AP_Filesystem_Sys::open(const char *fname, int flags)
     }
     if (strcmp(fname, "dma.txt") == 0) {
         hal.util->dma_info(*r.str);
+    }
+    if (strcmp(fname, "uarts.txt") == 0) {
+        hal.util->uart_info(*r.str);
     }
 #if HAL_MAX_CAN_PROTOCOL_DRIVERS
     int8_t can_stats_num = -1;
