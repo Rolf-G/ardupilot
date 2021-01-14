@@ -93,7 +93,7 @@ public:
     /*
       timer push (for oneshot min rate)
      */
-    void timer_tick(void) override;
+    void timer_tick(uint32_t last_run_us);
 
     /*
       setup for serial output to a set of ESCs, using the given
@@ -478,6 +478,8 @@ private:
 
     void dshot_send_groups();
     void dshot_send(pwm_group &group);
+    // release locks on the groups that are pending in reverse order
+    void dshot_collect_dma_locks(uint32_t last_run_us);
     static void dma_up_irq_callback(void *p, uint32_t flags);
     static void dma_unlock(void *p);
     void dma_cancel(pwm_group& group);

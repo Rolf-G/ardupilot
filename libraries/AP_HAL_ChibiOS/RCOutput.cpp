@@ -138,43 +138,48 @@ void RCOutput::rcout_thread()
             // long cables, and also keeps some ESCs happy that don't
             // like low rates
             dshot_send_groups();
-
-            // release locks on the groups that are pending in reverse order
-            for (int8_t i = NUM_GROUPS - 1; i >= 0; i--) {
-                pwm_group &group = pwm_group_list[i];
-                if (group.dma_handle != nullptr && group.dma_handle->is_locked()) {
-                    // calculate how long we have left
-                    const uint32_t deltat = AP_HAL::micros() - last_thread_run_us;
-                    // if we have time left wait for the event
-                    eventmask_t mask = 0;
-                    if (deltat < 1000) {
-                        mask = chEvtWaitOneTimeout(group.dshot_event_mask, chTimeUS2I(1000 - deltat));
-                    }
-                    // no time left cancel and restart
-                    if (!mask) {
-                        dma_cancel(group);
-                    }
-                    group.dshot_waiter = nullptr;
-#ifdef HAL_WITH_BIDIR_DSHOT
-                    // if using input capture DMA then clean up
-                    if (group.bdshot.enabled) {
-                        // the channel index only moves on with success
-                        const uint8_t chan = mask ? group.bdshot.prev_telem_chan
-                            : group.bdshot.curr_telem_chan;
-                        // only unlock if not shared
-                        if (group.bdshot.ic_dma_handle[chan] != nullptr
-                            && group.bdshot.ic_dma_handle[chan] != group.dma_handle) {
-                            group.bdshot.ic_dma_handle[chan]->unlock();
-                        }
-                    }
-#endif
-                    group.dma_handle->unlock();
-                }
-            }
+            // now unlock everything
+            dshot_collect_dma_locks(last_thread_run_us);
         }
 
         // process any pending RC output requests
-        timer_tick();
+        timer_tick(last_thread_run_us);
+    }
+}
+
+// release locks on the groups that are pending in reverse order
+void RCOutput::dshot_collect_dma_locks(uint32_t last_run_us)
+{
+    for (int8_t i = NUM_GROUPS - 1; i >= 0; i--) {
+        pwm_group &group = pwm_group_list[i];
+        if (group.dma_handle != nullptr && group.dma_handle->is_locked()) {
+            // calculate how long we have left
+            const uint32_t deltat = AP_HAL::micros() - last_run_us;
+            // if we have time left wait for the event
+            eventmask_t mask = 0;
+            if (deltat < 1000) {
+                mask = chEvtWaitOneTimeout(group.dshot_event_mask, chTimeUS2I(1000 - deltat));
+            }
+            // no time left cancel and restart
+            if (!mask) {
+                dma_cancel(group);
+            }
+            group.dshot_waiter = nullptr;
+#ifdef HAL_WITH_BIDIR_DSHOT
+            // if using input capture DMA then clean up
+            if (group.bdshot.enabled) {
+                // the channel index only moves on with success
+                const uint8_t chan = mask ? group.bdshot.prev_telem_chan
+                    : group.bdshot.curr_telem_chan;
+                // only unlock if not shared
+                if (group.bdshot.ic_dma_handle[chan] != nullptr
+                    && group.bdshot.ic_dma_handle[chan] != group.dma_handle) {
+                    group.bdshot.ic_dma_handle[chan]->unlock();
+                }
+            }
+#endif
+            group.dma_handle->unlock();
+        }
     }
 }
 
@@ -989,19 +994,24 @@ void RCOutput::trigger_groups(void)
   periodic timer. This is used for oneshot and dshot modes, plus for
   safety switch update. Runs every 1000us.
  */
-void RCOutput::timer_tick(void)
+void RCOutput::timer_tick(uint32_t last_run_us)
 {
     safety_update();
 
-    if (serial_led_pending && chMtxTryLock(&trigger_mutex)) {
+    // if we have enough time left send out LED data
+    if (serial_led_pending && AP_HAL::micros() - last_run_us < 500 && chMtxTryLock(&trigger_mutex)) {
         serial_led_pending = false;
         for (auto &group : pwm_group_list) {
             if (group.serial_led_pending && (group.current_mode == MODE_NEOPIXEL || group.current_mode == MODE_PROFILED)) {
                 group.serial_led_pending = !serial_led_send(group);
                 group.prepared_send = group.serial_led_pending;
-                serial_led_pending |=  group.serial_led_pending;
+                serial_led_pending |= group.serial_led_pending;
             }
         }
+
+        // release locks on the groups that are pending in reverse order
+        dshot_collect_dma_locks(last_run_us);
+
         chMtxUnlock(&trigger_mutex);
     }
     if (min_pulse_trigger_us == 0 ||
@@ -1257,6 +1267,9 @@ bool RCOutput::serial_led_send(pwm_group &group)
 
     // fill the DMA buffer while we have the lock
     fill_DMA_buffer_serial_led(group);
+    group.dshot_waiter = rcout_thread_ctx;
+
+    chEvtGetAndClearEvents(group.dshot_event_mask);
 
     // start sending the pulses out
     send_pulses_DMAR(group, group.dma_buffer_len);
