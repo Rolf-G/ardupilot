@@ -470,7 +470,11 @@ void RCOutput::dma_up_irq_callback(void *p, uint32_t flags)
         TOGGLE_PIN_DEBUG(55);
     } else {
         // non-bidir case
-        chVTSetI(&group->dma_timeout, chTimeUS2I(group->dshot_pulse_time_us + 40), dma_unlock, p);
+        // this prevents us ever having two dshot pulses too close together
+        // LED sends might be quite long so adjust the timeout appropriately
+        const uint32_t period_us = AP_HAL::micros() - group->last_dmar_send_us;
+        const uint32_t remain_us = period_us < group->dshot_pulse_time_us ? 40 + group->dshot_pulse_time_us - period_us : 40;
+        chVTSetI(&group->dma_timeout, chTimeUS2I(remain_us), dma_unlock, p);
     }
 
     chSysUnlockFromISR();

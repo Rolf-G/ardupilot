@@ -256,7 +256,7 @@ private:
         uint32_t bit_width_mul;
         uint32_t rc_frequency;
         bool in_serial_dma;
-        uint64_t last_dmar_send_us;
+        uint32_t last_dmar_send_us;
         uint32_t dshot_pulse_time_us;
         uint32_t dshot_pulse_send_time_us;
         virtual_timer_t dma_timeout;
@@ -331,7 +331,7 @@ private:
 #endif
         // are we safe to send another pulse?
         bool can_send_dshot_pulse() const {
-          return is_dshot_protocol(current_mode) && AP_HAL::micros64() - last_dmar_send_us > (dshot_pulse_time_us + 50);
+          return is_dshot_protocol(current_mode) && AP_HAL::micros() - last_dmar_send_us > (dshot_pulse_time_us + 50);
         }
     };
     /*

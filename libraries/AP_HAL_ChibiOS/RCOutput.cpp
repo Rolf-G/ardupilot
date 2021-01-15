@@ -1248,8 +1248,6 @@ void RCOutput::dshot_send(pwm_group &group)
     chEvtGetAndClearEvents(group.dshot_event_mask);
     // start sending the pulses out
     send_pulses_DMAR(group, DSHOT_BUFFER_LENGTH);
-
-    group.last_dmar_send_us = AP_HAL::micros64();
 #endif //#ifndef DISABLE_DSHOT
 }
 
@@ -1273,8 +1271,6 @@ bool RCOutput::serial_led_send(pwm_group &group)
 
     // start sending the pulses out
     send_pulses_DMAR(group, group.dma_buffer_len);
-
-    group.last_dmar_send_us = AP_HAL::micros64();
 #endif //#ifndef DISABLE_DSHOT
     return true;
 }
@@ -1322,6 +1318,8 @@ void RCOutput::send_pulses_DMAR(pwm_group &group, uint32_t buffer_length)
     TOGGLE_PIN_DEBUG(54);
 
     dmaStreamEnable(group.dma);
+    // record when the transaction was started
+    group.last_dmar_send_us = AP_HAL::micros64();
 #endif //#ifndef DISABLE_DSHOT
 }
 
@@ -1353,7 +1351,10 @@ void RCOutput::dma_up_irq_callback(void *p, uint32_t flags)
         chEvtSignalI(irq.waiter, serial_event_mask);
     } else {
         // this prevents us ever having two dshot pulses too close together
-        chVTSetI(&group->dma_timeout, chTimeUS2I(group->dshot_pulse_time_us + 40), dma_unlock, p);
+        // LED sends might be quite long so adjust the timeout appropriately
+        const uint32_t period_us = AP_HAL::micros() - group->last_dmar_send_us;
+        const uint32_t remain_us = period_us < group->dshot_pulse_time_us ? 40 + group->dshot_pulse_time_us - period_us : 40;
+        chVTSetI(&group->dma_timeout, chTimeUS2I(remain_us), dma_unlock, p);
     }
     chSysUnlockFromISR();
 }
