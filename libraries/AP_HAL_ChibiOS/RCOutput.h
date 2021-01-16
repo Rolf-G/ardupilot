@@ -199,6 +199,13 @@ private:
       RECV_COMPLETE = 4
     };
 
+    struct SerialLed {
+      uint8_t led;
+      uint8_t red;
+      uint8_t green;
+      uint8_t blue;
+    };
+
     /*
       DShot handling
      */
@@ -252,6 +259,9 @@ private:
         uint8_t clock_mask;
         bool serial_led_pending;
         bool prepared_send;
+        // structure to hold serial LED data until it can be transferred
+        // to the DMA buffer
+        SerialLed* serial_led_data;
 
         // serial output
         struct {
@@ -446,6 +456,7 @@ private:
       return true if send was successful
     */
     bool serial_led_send(pwm_group &group);
+    void fill_DMA_buffer_serial_led(pwm_group& group);
     bool serial_led_pending;
 
     void dma_allocate(Shared_DMA *ctx);

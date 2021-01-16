@@ -668,7 +668,6 @@ void RCOutput::set_group_mode(pwm_group &group)
             group.current_mode = MODE_PWM_NONE;
             break;
         }
-
         // calculate min time between pulses
         group.dshot_pulse_time_us = 1000000UL * bit_length / rate;
         break;
@@ -1188,6 +1187,9 @@ bool RCOutput::serial_led_send(pwm_group &group)
         // doing serial output, don't send Serial LED pulses
         return false;
     }
+
+    // fill the DMA buffer while we have the lock
+    fill_DMA_buffer_serial_led(group);
 
     // start sending the pulses out
     send_pulses_DMAR(group, group.dma_buffer_len);
@@ -1787,6 +1789,8 @@ bool RCOutput::set_serial_led_num_LEDs(const uint16_t chan, uint8_t num_leds, ou
         return false;
     }
 
+    const uint8_t old_nleds = grp->serial_nleds;
+
     switch (mode) {
         case MODE_NEOPIXEL: {
             grp->serial_nleds = MAX(num_leds, grp->serial_nleds);
@@ -1811,9 +1815,48 @@ bool RCOutput::set_serial_led_num_LEDs(const uint16_t chan, uint8_t num_leds, ou
         }
     }
 
+    // allocate the data storage array
+    if (old_nleds != grp->serial_nleds) {
+        if (grp->serial_led_data != nullptr) {
+            delete[] grp->serial_led_data;
+        }
+        grp->serial_led_data = new SerialLed[grp->serial_nleds];
+    }
+
     set_output_mode(1U<<chan, mode);
 
     return grp->current_mode == mode;
+}
+
+#pragma GCC push_options
+#pragma GCC optimize("O2")
+// Fill the group DMA buffer with data to be output
+void RCOutput::fill_DMA_buffer_serial_led(pwm_group& group)
+{
+    for (uint8_t i = 0; i < group.serial_nleds; i++) {
+        const SerialLed& led = group.serial_led_data[i];
+        switch (group.current_mode) {
+            case MODE_NEOPIXEL:
+                _set_neopixel_rgb_data(&group, i, led.led, led.red, led.green, led.blue);
+                break;
+            case MODE_PROFILED: {
+                if (led.led < group.serial_nleds - 2) {
+                    _set_profiled_rgb_data(&group, i, led.led, led.red, led.green, led.blue);
+                } else {
+                    _set_profiled_blank_frame(&group, i, led.led);
+                }
+
+                for (uint8_t j = 0; j < 4; j++) {
+                    if ((group.clock_mask & 1U<<j) != 0) {
+                       _set_profiled_clock(&group, j, led.led);
+                    }
+                }
+                break;
+            }
+            default:
+                return;
+        }
+    }
 }
 
 /*
@@ -1883,6 +1926,7 @@ void RCOutput::_set_profiled_clock(pwm_group *grp, uint8_t idx, uint8_t led)
         buf[b * stride] = BIT_1;
     }
 }
+#pragma GCC pop_options
 
 /*
   setup serial LED output data for a given output channel
@@ -1912,30 +1956,15 @@ void RCOutput::set_serial_led_rgb_data(const uint16_t chan, int8_t led, uint8_t 
     }
 
     switch (grp->current_mode) {
-        case MODE_NEOPIXEL: {
-            _set_neopixel_rgb_data(grp, i, uint8_t(led), red, green, blue);
+        case MODE_PROFILED:
+        case MODE_NEOPIXEL:
+            grp->serial_led_data[i].led = uint8_t(led);
+            grp->serial_led_data[i].red = red;
+            grp->serial_led_data[i].green = green;
+            grp->serial_led_data[i].blue = blue;
             break;
-        }
-
-        case MODE_PROFILED: {
-            if (led < grp->serial_nleds - 2) {
-                _set_profiled_rgb_data(grp, i, uint8_t(led), red, green, blue);
-            } else {
-                _set_profiled_blank_frame(grp, i, uint8_t(led));
-            }
-
-            for (uint8_t j = 0; j < 4; j++) {
-                if ((grp->clock_mask & 1U<<j) != 0) {
-                   _set_profiled_clock(grp, j, uint8_t(led));
-                }
-            }
-
-            break;
-        }
-
-        default: {
+        default:
             return;
-        }
     }
 }
 
