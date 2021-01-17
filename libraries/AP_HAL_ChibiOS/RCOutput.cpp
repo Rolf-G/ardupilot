@@ -112,6 +112,8 @@ void RCOutput::init()
     hal.gpio->pinMode(56, 1);
     hal.gpio->pinMode(57, 1);
 #endif
+
+    _initialised = true;
 }
 
 /*
@@ -739,6 +741,7 @@ void RCOutput::set_group_mode(pwm_group &group)
         const uint8_t channels_per_group = 4;
         const uint16_t bit_length = bits_per_pixel * channels_per_group * group.serial_nleds + (pad_start_bits + pad_end_bits) * channels_per_group;
         const uint16_t buffer_length = bit_length * sizeof(uint32_t);
+
         if (!setup_group_DMA(group, rate, bit_period, active_high, buffer_length, true)) {
             group.current_mode = MODE_PWM_NONE;
             break;
@@ -998,25 +1001,19 @@ void RCOutput::timer_tick(uint32_t last_run_us)
 {
     safety_update();
 
+    if (min_pulse_trigger_us == 0 || serial_group != nullptr) {
+        return;
+    }
+
     // if we have enough time left send out LED data
-    if (serial_led_pending && AP_HAL::micros() - last_run_us < 500 && chMtxTryLock(&trigger_mutex)) {
+    if (serial_led_pending && AP_HAL::micros() - last_run_us < 500) {
         serial_led_pending = false;
         for (auto &group : pwm_group_list) {
-            if (group.serial_led_pending && (group.current_mode == MODE_NEOPIXEL || group.current_mode == MODE_PROFILED)) {
-                group.serial_led_pending = !serial_led_send(group);
-                group.prepared_send = group.serial_led_pending;
-                serial_led_pending |= group.serial_led_pending;
-            }
+            serial_led_pending |= !serial_led_send(group);
         }
 
         // release locks on the groups that are pending in reverse order
         dshot_collect_dma_locks(last_run_us);
-
-        chMtxUnlock(&trigger_mutex);
-    }
-    if (min_pulse_trigger_us == 0 ||
-        serial_group != nullptr) {
-        return;
     }
 
     uint32_t now = AP_HAL::micros();
@@ -1257,14 +1254,27 @@ void RCOutput::dshot_send(pwm_group &group)
  */
 bool RCOutput::serial_led_send(pwm_group &group)
 {
+    if (!group.serial_led_pending
+        || (group.current_mode != MODE_NEOPIXEL && group.current_mode != MODE_PROFILED)) {
+        return true;
+    }
+
 #ifndef DISABLE_DSHOT
     if (irq.waiter || !group.dma_handle->lock_nonblock()) {
         // doing serial output, don't send Serial LED pulses
         return false;
     }
 
-    // fill the DMA buffer while we have the lock
-    fill_DMA_buffer_serial_led(group);
+    {
+        WITH_SEMAPHORE(group.serial_led_mutex);
+
+        group.serial_led_pending = false;
+        group.prepared_send = false;
+
+        // fill the DMA buffer while we have the lock
+        fill_DMA_buffer_serial_led(group);
+    }
+
     group.dshot_waiter = rcout_thread_ctx;
 
     chEvtGetAndClearEvents(group.dshot_event_mask);
@@ -1883,22 +1893,31 @@ uint32_t RCOutput::protocol_bitrate(const enum output_mode mode)
 */
 bool RCOutput::set_serial_led_num_LEDs(const uint16_t chan, uint8_t num_leds, output_mode mode, uint16_t clock_mask)
 {
-    uint8_t i;
+    if (!_initialised) {
+        return false;
+    }
+
+    uint8_t i = 0;
     pwm_group *grp = find_chan(chan, i);
     if (!grp) {
         return false;
     }
 
-    const uint8_t old_nleds = grp->serial_nleds;
+    // we must hold the LED mutex while resizing the array
+    WITH_SEMAPHORE(grp->serial_led_mutex);
+    // nothing is as nothing does
+    if (grp->serial_nleds == num_leds && mode == grp->current_mode) {
+        return true;
+    }
 
     switch (mode) {
         case MODE_NEOPIXEL: {
-            grp->serial_nleds = MAX(num_leds, grp->serial_nleds);
+            num_leds = MAX(num_leds, grp->serial_nleds);
             break;
         }
         case MODE_PROFILED: {
             // ProfiLED requires two dummy LED's to mark end of transmission
-            grp->serial_nleds = MAX(num_leds + 2, grp->serial_nleds);
+            num_leds = MAX(num_leds + 2, grp->serial_nleds);
 
             // Enable any clock channels in the same group
             grp->clock_mask = 0;
@@ -1910,17 +1929,21 @@ bool RCOutput::set_serial_led_num_LEDs(const uint16_t chan, uint8_t num_leds, ou
 
             break;
         }
-        default: {
+        default:
             return false;
-        }
     }
 
     // allocate the data storage array
-    if (old_nleds != grp->serial_nleds) {
+    if (grp->serial_nleds != num_leds) {
         if (grp->serial_led_data != nullptr) {
             delete[] grp->serial_led_data;
+            grp->serial_led_data = nullptr;
         }
-        grp->serial_led_data = new SerialLed[grp->serial_nleds];
+        if (num_leds > 0) {
+            grp->serial_led_data = new SerialLed[num_leds];
+        }
+
+        grp->serial_nleds = num_leds;
     }
 
     set_output_mode(1U<<chan, mode);
@@ -1937,24 +1960,24 @@ void RCOutput::fill_DMA_buffer_serial_led(pwm_group& group)
         const SerialLed& led = group.serial_led_data[i];
         switch (group.current_mode) {
             case MODE_NEOPIXEL:
-                _set_neopixel_rgb_data(&group, i, led.led, led.red, led.green, led.blue);
+                _set_neopixel_rgb_data(&group, led.idx, i, led.red, led.green, led.blue);
                 break;
             case MODE_PROFILED: {
-                if (led.led < group.serial_nleds - 2) {
-                    _set_profiled_rgb_data(&group, i, led.led, led.red, led.green, led.blue);
+                if (i < group.serial_nleds - 2) {
+                    _set_profiled_rgb_data(&group, led.idx, i, led.red, led.green, led.blue);
                 } else {
-                    _set_profiled_blank_frame(&group, i, led.led);
+                    _set_profiled_blank_frame(&group, led.idx, i);
                 }
 
                 for (uint8_t j = 0; j < 4; j++) {
                     if ((group.clock_mask & 1U<<j) != 0) {
-                       _set_profiled_clock(&group, j, led.led);
+                       _set_profiled_clock(&group, j, i);
                     }
                 }
                 break;
             }
             default:
-                return;
+                break;
         }
     }
 }
@@ -2034,37 +2057,56 @@ void RCOutput::_set_profiled_clock(pwm_group *grp, uint8_t idx, uint8_t led)
 */
 void RCOutput::set_serial_led_rgb_data(const uint16_t chan, int8_t led, uint8_t red, uint8_t green, uint8_t blue)
 {
-    uint8_t i;
-    pwm_group *grp = find_chan(chan, i);
-    if (!grp) {
+    if (!_initialised) {
         return;
     }
 
-    if (led >= grp->serial_nleds || (grp->current_mode != MODE_NEOPIXEL && grp->current_mode != MODE_PROFILED)) {
+    uint8_t i = 0;
+    pwm_group *grp = find_chan(chan, i);
+
+    WITH_SEMAPHORE(grp->serial_led_mutex);
+
+    if (!grp || grp->serial_nleds == 0) {
         return;
     }
 
     if (led == -1) {
         grp->prepared_send = true;
         for (uint8_t n=0; n<grp->serial_nleds; n++) {
-            set_serial_led_rgb_data(chan, n, red, green, blue);
+            serial_led_set_single_rgb_data(*grp, i, n, red, green, blue);
         }
         return;
-    } else if (!grp->prepared_send) {
-        // if not ouput clock and trailing frames, run through all LED's to do it now
-        set_serial_led_rgb_data(chan, -1, 0, 0, 0);
     }
 
-    switch (grp->current_mode) {
+    // if not ouput clock and trailing frames, run through all LED's to do it now
+    if (!grp->prepared_send) {
+        for (uint8_t n=0; n<grp->serial_nleds; n++) {
+            serial_led_set_single_rgb_data(*grp, i, n, 0, 0, 0);
+        }
+    }
+    serial_led_set_single_rgb_data(*grp, i, uint8_t(led), red, green, blue);
+}
+
+/*
+  setup serial LED output data for a given output channel
+  and a LED number. LED -1 is all LEDs
+*/
+void RCOutput::serial_led_set_single_rgb_data(pwm_group& group, uint8_t idx, uint8_t led, uint8_t red, uint8_t green, uint8_t blue)
+{
+    if (led >= group.serial_nleds || (group.current_mode != MODE_NEOPIXEL && group.current_mode != MODE_PROFILED)) {
+        return;
+    }
+
+    switch (group.current_mode) {
         case MODE_PROFILED:
         case MODE_NEOPIXEL:
-            grp->serial_led_data[i].led = uint8_t(led);
-            grp->serial_led_data[i].red = red;
-            grp->serial_led_data[i].green = green;
-            grp->serial_led_data[i].blue = blue;
+            group.serial_led_data[led].idx = idx;
+            group.serial_led_data[led].red = red;
+            group.serial_led_data[led].green = green;
+            group.serial_led_data[led].blue = blue;
             break;
         default:
-            return;
+            break;
     }
 }
 
@@ -2073,17 +2115,25 @@ void RCOutput::set_serial_led_rgb_data(const uint16_t chan, int8_t led, uint8_t 
 */
 void RCOutput::serial_led_send(const uint16_t chan)
 {
+    if (!_initialised) {
+        return;
+    }
+
     uint8_t i;
     pwm_group *grp = find_chan(chan, i);
     if (!grp) {
         return;
     }
-    if (grp->current_mode != MODE_NEOPIXEL && grp->current_mode != MODE_PROFILED) {
+
+    WITH_SEMAPHORE(grp->serial_led_mutex);
+
+    if (grp->serial_nleds == 0 || (grp->current_mode != MODE_NEOPIXEL && grp->current_mode != MODE_PROFILED)) {
         return;
     }
+
     if (grp->prepared_send) {
-        serial_led_pending = true; 
         grp->serial_led_pending = true;
+        serial_led_pending = true;
     }
 }
 
