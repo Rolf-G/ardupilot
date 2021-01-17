@@ -1001,7 +1001,7 @@ void RCOutput::timer_tick(uint32_t last_run_us)
 {
     safety_update();
 
-    if (min_pulse_trigger_us == 0 || serial_group != nullptr) {
+    if (serial_group != nullptr) {
         return;
     }
 
@@ -1014,6 +1014,10 @@ void RCOutput::timer_tick(uint32_t last_run_us)
 
         // release locks on the groups that are pending in reverse order
         dshot_collect_dma_locks(last_run_us);
+    }
+
+    if (min_pulse_trigger_us == 0) {
+        return;
     }
 
     uint32_t now = AP_HAL::micros();
